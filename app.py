@@ -120,8 +120,7 @@ if admin:
 page = st.sidebar.radio("Navigate", pages, label_visibility="collapsed")
 
 if st.sidebar.button("Refresh"):
-    storage.get_index(force_refresh=True)
-    st.sidebar.success("Refreshed.")
+    st.rerun()
 
 st.sidebar.divider()
 if st.sidebar.button("Logout"):
@@ -360,7 +359,6 @@ elif page == "Admin" and admin:
                 st.markdown(f"**{uname}** — joined {joined} — {file_count} file(s)")
 
         if st.button("Refresh users"):
-            storage.get_users(force_refresh=True)
             st.rerun()
 
     with tab_files:

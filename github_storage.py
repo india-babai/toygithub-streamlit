@@ -3,14 +3,11 @@ import json
 import secrets as _secrets
 from datetime import datetime, timezone
 
-import streamlit as st
 from github import Github, GithubException
 
 INDEX_PATH = "_index.json"
 USERS_PATH = "_users.json"
 FILES_PREFIX = "files/"
-_INDEX_KEY = "_tgh_index"
-_USERS_KEY = "_tgh_users"
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -54,27 +51,21 @@ class GitHubStorage:
     # Index
     # ------------------------------------------------------------------
 
-    def get_index(self, force_refresh: bool = False) -> dict:
-        if force_refresh or _INDEX_KEY not in st.session_state:
-            st.session_state[_INDEX_KEY] = self._get_json(INDEX_PATH, {"files": {}})
-        return st.session_state[_INDEX_KEY]
+    def get_index(self) -> dict:
+        return self._get_json(INDEX_PATH, {"files": {}})
 
     def _save_index(self, index: dict):
         self._put_json(INDEX_PATH, index)
-        st.session_state.pop(_INDEX_KEY, None)
 
     # ------------------------------------------------------------------
     # Users
     # ------------------------------------------------------------------
 
-    def get_users(self, force_refresh: bool = False) -> dict:
-        if force_refresh or _USERS_KEY not in st.session_state:
-            st.session_state[_USERS_KEY] = self._get_json(USERS_PATH, {"users": {}})
-        return st.session_state[_USERS_KEY]
+    def get_users(self) -> dict:
+        return self._get_json(USERS_PATH, {"users": {}})
 
     def _save_users(self, users: dict):
         self._put_json(USERS_PATH, users)
-        st.session_state.pop(_USERS_KEY, None)
 
     def register_user(self, username: str, password: str) -> bool:
         """Returns False if username already taken."""
@@ -185,8 +176,7 @@ class GitHubStorage:
         return self.get_index()["files"]
 
     def get_user_folders(self, username: str) -> list[str]:
-        files = self.get_user_files(username)
-        return sorted({v["folder"] for v in files.values() if v["folder"]})
+        return sorted({v["folder"] for v in self.get_user_files(username).values() if v["folder"]})
 
     def file_exists(self, username: str, folder: str, filename: str) -> bool:
         return self._file_key(username, folder, filename) in self.get_index()["files"]
