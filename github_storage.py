@@ -1,12 +1,24 @@
+import hashlib
 import json
+import secrets as _secrets
 from datetime import datetime, timezone
 
 import streamlit as st
 from github import Github, GithubException
 
 INDEX_PATH = "_index.json"
+USERS_PATH = "_users.json"
 FILES_PREFIX = "files/"
-_SESSION_KEY = "_tgh_index"
+_INDEX_KEY = "_tgh_index"
+_USERS_KEY = "_tgh_users"
+
+
+def _hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000).hex()
+
+
+def _new_salt() -> str:
+    return _secrets.token_hex(16)
 
 
 class GitHubStorage:
@@ -15,36 +27,88 @@ class GitHubStorage:
         self._repo = self._gh.get_repo(repo_name)
 
     # ------------------------------------------------------------------
-    # Index helpers
+    # Low-level JSON helpers
     # ------------------------------------------------------------------
 
-    def _load_index(self) -> dict:
+    def _get_json(self, path: str, default: dict) -> dict:
         try:
-            content = self._repo.get_contents(INDEX_PATH)
+            content = self._repo.get_contents(path)
             return json.loads(content.decoded_content.decode("utf-8"))
         except GithubException as e:
             if e.status == 404:
-                return {"files": {}}
+                return default
             raise
 
-    def _save_index(self, index: dict):
-        data = json.dumps(index, indent=2, ensure_ascii=False).encode("utf-8")
+    def _put_json(self, path: str, data: dict):
+        raw = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
         try:
-            existing = self._repo.get_contents(INDEX_PATH)
-            self._repo.update_file(INDEX_PATH, "Update index", data, existing.sha)
+            existing = self._repo.get_contents(path)
+            self._repo.update_file(path, f"Update {path}", raw, existing.sha)
         except GithubException as e:
             if e.status == 404:
-                self._repo.create_file(INDEX_PATH, "Create index", data)
+                self._repo.create_file(path, f"Create {path}", raw)
             else:
                 raise
 
-    def get_index(self, force_refresh: bool = False) -> dict:
-        if force_refresh or _SESSION_KEY not in st.session_state:
-            st.session_state[_SESSION_KEY] = self._load_index()
-        return st.session_state[_SESSION_KEY]
+    # ------------------------------------------------------------------
+    # Index
+    # ------------------------------------------------------------------
 
-    def _invalidate_cache(self):
-        st.session_state.pop(_SESSION_KEY, None)
+    def get_index(self, force_refresh: bool = False) -> dict:
+        if force_refresh or _INDEX_KEY not in st.session_state:
+            st.session_state[_INDEX_KEY] = self._get_json(INDEX_PATH, {"files": {}})
+        return st.session_state[_INDEX_KEY]
+
+    def _save_index(self, index: dict):
+        self._put_json(INDEX_PATH, index)
+        st.session_state.pop(_INDEX_KEY, None)
+
+    # ------------------------------------------------------------------
+    # Users
+    # ------------------------------------------------------------------
+
+    def get_users(self, force_refresh: bool = False) -> dict:
+        if force_refresh or _USERS_KEY not in st.session_state:
+            st.session_state[_USERS_KEY] = self._get_json(USERS_PATH, {"users": {}})
+        return st.session_state[_USERS_KEY]
+
+    def _save_users(self, users: dict):
+        self._put_json(USERS_PATH, users)
+        st.session_state.pop(_USERS_KEY, None)
+
+    def register_user(self, username: str, password: str) -> bool:
+        """Returns False if username already taken."""
+        users = self.get_users()
+        if username in users["users"]:
+            return False
+        salt = _new_salt()
+        users["users"][username] = {
+            "password_hash": _hash_password(password, salt),
+            "salt": salt,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save_users(users)
+        return True
+
+    def verify_user(self, username: str, password: str) -> bool:
+        users = self.get_users()
+        user = users["users"].get(username)
+        if not user:
+            return False
+        return _hash_password(password, user["salt"]) == user["password_hash"]
+
+    def username_exists(self, username: str) -> bool:
+        return username in self.get_users()["users"]
+
+    # ------------------------------------------------------------------
+    # File path helpers
+    # ------------------------------------------------------------------
+
+    def _file_key(self, username: str, folder: str, filename: str) -> str:
+        return f"{username}/{folder}/{filename}" if folder else f"{username}/{filename}"
+
+    def _repo_path(self, username: str, folder: str, filename: str) -> str:
+        return FILES_PREFIX + self._file_key(username, folder, filename)
 
     # ------------------------------------------------------------------
     # File operations
@@ -52,12 +116,14 @@ class GitHubStorage:
 
     def upload_file(
         self,
+        username: str,
+        folder: str,
         filename: str,
         content: bytes,
         tags: list[str],
         description: str,
     ):
-        path = FILES_PREFIX + filename
+        path = self._repo_path(username, folder, filename)
         now = datetime.now(timezone.utc).isoformat()
         try:
             existing = self._repo.get_contents(path)
@@ -70,27 +136,25 @@ class GitHubStorage:
 
         sha = result["content"].sha
         index = self.get_index()
-        index["files"][filename] = {
+        key = self._file_key(username, folder, filename)
+        index["files"][key] = {
+            "owner": username,
+            "folder": folder,
+            "filename": filename,
             "tags": tags,
             "description": description,
             "uploaded_at": now,
             "sha": sha,
         }
         self._save_index(index)
-        self._invalidate_cache()
 
-    def get_file_content(self, filename: str) -> str:
-        path = FILES_PREFIX + filename
+    def get_file_content(self, username: str, folder: str, filename: str) -> str:
+        path = self._repo_path(username, folder, filename)
         content = self._repo.get_contents(path)
         return content.decoded_content.decode("utf-8")
 
-    def get_file_bytes(self, filename: str) -> bytes:
-        path = FILES_PREFIX + filename
-        content = self._repo.get_contents(path)
-        return content.decoded_content
-
-    def delete_file(self, filename: str):
-        path = FILES_PREFIX + filename
+    def delete_file(self, username: str, folder: str, filename: str):
+        path = self._repo_path(username, folder, filename)
         try:
             existing = self._repo.get_contents(path)
             self._repo.delete_file(path, f"Delete {filename}", existing.sha)
@@ -98,17 +162,31 @@ class GitHubStorage:
             if e.status != 404:
                 raise
         index = self.get_index()
-        index["files"].pop(filename, None)
+        key = self._file_key(username, folder, filename)
+        index["files"].pop(key, None)
         self._save_index(index)
-        self._invalidate_cache()
 
-    def update_metadata(self, filename: str, tags: list[str], description: str):
+    def update_metadata(self, username: str, folder: str, filename: str, tags: list[str], description: str):
         index = self.get_index()
-        if filename in index["files"]:
-            index["files"][filename]["tags"] = tags
-            index["files"][filename]["description"] = description
+        key = self._file_key(username, folder, filename)
+        if key in index["files"]:
+            index["files"][key]["tags"] = tags
+            index["files"][key]["description"] = description
             self._save_index(index)
-            self._invalidate_cache()
 
-    def file_exists(self, filename: str) -> bool:
-        return filename in self.get_index()["files"]
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+
+    def get_user_files(self, username: str) -> dict:
+        return {k: v for k, v in self.get_index()["files"].items() if v["owner"] == username}
+
+    def get_all_files(self) -> dict:
+        return self.get_index()["files"]
+
+    def get_user_folders(self, username: str) -> list[str]:
+        files = self.get_user_files(username)
+        return sorted({v["folder"] for v in files.values() if v["folder"]})
+
+    def file_exists(self, username: str, folder: str, filename: str) -> bool:
+        return self._file_key(username, folder, filename) in self.get_index()["files"]

@@ -27,30 +27,7 @@ LANG_MAP = {
 # Page config
 # ---------------------------------------------------------------------------
 
-st.set_page_config(
-    page_title="ToyGitHub",
-    page_icon=":file_folder:",
-    layout="wide",
-)
-
-# ---------------------------------------------------------------------------
-# Auth
-# ---------------------------------------------------------------------------
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-    st.title(":lock: ToyGitHub")
-    st.caption("Private code sharing — enter the password to continue.")
-    pwd = st.text_input("Password", type="password", key="login_pwd")
-    if st.button("Enter", type="primary"):
-        if pwd == st.secrets["app_password"]:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Wrong password.")
-    st.stop()
+st.set_page_config(page_title="ToyGitHub", page_icon=":file_folder:", layout="wide")
 
 # ---------------------------------------------------------------------------
 # Storage singleton
@@ -66,23 +43,85 @@ def get_storage() -> GitHubStorage:
 storage = get_storage()
 
 # ---------------------------------------------------------------------------
-# Sidebar navigation
+# Auth helpers
 # ---------------------------------------------------------------------------
 
-st.sidebar.title(":file_folder: ToyGitHub")
-page = st.sidebar.radio(
-    "Navigate",
-    ["Browse Files", "Upload File", "Manage Files"],
-    label_visibility="collapsed",
-)
+def is_admin() -> bool:
+    return st.session_state.get("username") == st.secrets.get("admin_username", "")
 
-if st.sidebar.button("Refresh index"):
+def current_user() -> str:
+    return st.session_state.get("username", "")
+
+# ---------------------------------------------------------------------------
+# Auth gate: login / register
+# ---------------------------------------------------------------------------
+
+if "username" not in st.session_state:
+    st.title(":file_folder: ToyGitHub")
+
+    tab_login, tab_register = st.tabs(["Login", "Register"])
+
+    with tab_login:
+        uname = st.text_input("Username", key="login_user")
+        pwd = st.text_input("Password", type="password", key="login_pwd")
+        if st.button("Login", type="primary", key="btn_login"):
+            if not uname or not pwd:
+                st.error("Please enter username and password.")
+            elif storage.verify_user(uname, pwd):
+                st.session_state.username = uname
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+    with tab_register:
+        st.caption("Create a new account. No email needed.")
+        new_user = st.text_input("Choose a username", key="reg_user")
+        new_pwd = st.text_input("Choose a password", type="password", key="reg_pwd")
+        new_pwd2 = st.text_input("Confirm password", type="password", key="reg_pwd2")
+        if st.button("Register", type="primary", key="btn_register"):
+            if not new_user or not new_pwd:
+                st.error("Username and password are required.")
+            elif new_pwd != new_pwd2:
+                st.error("Passwords do not match.")
+            elif len(new_pwd) < 6:
+                st.error("Password must be at least 6 characters.")
+            elif not new_user.replace("-", "").replace("_", "").isalnum():
+                st.error("Username may only contain letters, numbers, hyphens, and underscores.")
+            else:
+                ok = storage.register_user(new_user, new_pwd)
+                if ok:
+                    st.session_state.username = new_user
+                    st.success(f"Account created! Welcome, {new_user}.")
+                    st.rerun()
+                else:
+                    st.error("Username already taken. Please choose another.")
+
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+admin = is_admin()
+user = current_user()
+
+st.sidebar.title(":file_folder: ToyGitHub")
+st.sidebar.caption(f"Logged in as **{user}**" + (" (admin)" if admin else ""))
+
+pages = ["Browse Files", "Upload Files", "Manage Files"]
+if admin:
+    pages.append("Admin")
+
+page = st.sidebar.radio("Navigate", pages, label_visibility="collapsed")
+
+if st.sidebar.button("Refresh"):
     storage.get_index(force_refresh=True)
     st.sidebar.success("Refreshed.")
 
 st.sidebar.divider()
 if st.sidebar.button("Logout"):
-    st.session_state.authenticated = False
+    for key in ["username"]:
+        st.session_state.pop(key, None)
     st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -96,14 +135,11 @@ def _ext(filename: str) -> str:
 def _lang(filename: str) -> str:
     return LANG_MAP.get(_ext(filename), "text")
 
-def _tag_badges(tags: list[str]) -> str:
-    if not tags:
-        return ""
-    return " ".join(f"`{t}`" for t in tags)
+def _tag_badges(tags: list) -> str:
+    return " ".join(f"`{t}`" for t in tags) if tags else ""
 
 def _render_file(filename: str, content: str):
-    ext = _ext(filename)
-    if ext == "md":
+    if _ext(filename) == "md":
         st.markdown(content)
     else:
         st.code(content, language=_lang(filename), line_numbers=True)
@@ -115,122 +151,127 @@ def _render_file(filename: str, content: str):
 if page == "Browse Files":
     st.title("Browse Files")
 
-    index = storage.get_index()
-    files = index["files"]
+    files = storage.get_user_files(user) if not admin else storage.get_all_files()
 
     if not files:
-        st.info("No files uploaded yet. Go to **Upload File** to add your first file.")
+        st.info("No files yet. Go to **Upload Files** to add your first file.")
         st.stop()
 
-    # Collect all tags
     all_tags = sorted({t for meta in files.values() for t in meta["tags"]})
+    all_owners = sorted({meta["owner"] for meta in files.values()}) if admin else []
 
-    col1, col2 = st.columns([2, 1])
+    col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
         search = st.text_input("Search by filename", placeholder="e.g. etl_pipeline")
     with col2:
         tag_filter = st.multiselect("Filter by tag", all_tags)
+    with col3:
+        owner_filter = st.selectbox("Filter by user", ["All"] + all_owners) if admin else None
 
-    # Filter
     filtered = {
-        name: meta for name, meta in files.items()
-        if (not search or search.lower() in name.lower())
-        and (not tag_filter or any(t in meta["tags"] for t in tag_filter))
+        k: v for k, v in files.items()
+        if (not search or search.lower() in v["filename"].lower())
+        and (not tag_filter or any(t in v["tags"] for t in tag_filter))
+        and (not admin or owner_filter == "All" or v["owner"] == owner_filter)
     }
 
     if not filtered:
         st.warning("No files match your filters.")
         st.stop()
 
+    # Group by owner → folder
+    grouped: dict[str, dict[str, list]] = {}
+    for key, meta in sorted(filtered.items()):
+        owner = meta["owner"]
+        folder = meta["folder"] or "(root)"
+        grouped.setdefault(owner, {}).setdefault(folder, []).append((key, meta))
+
     st.caption(f"{len(filtered)} file(s) found")
+
+    for owner, folders in sorted(grouped.items()):
+        if admin:
+            st.subheader(f":bust_in_silhouette: {owner}")
+        for folder_name, file_list in sorted(folders.items()):
+            with st.expander(f":open_file_folder: {folder_name}  ({len(file_list)} file(s))", expanded=True):
+                for key, meta in file_list:
+                    filename = meta["filename"]
+                    folder = meta["folder"]
+                    file_owner = meta["owner"]
+                    st.markdown(f"**{filename}**  {_tag_badges(meta['tags'])}")
+                    if meta.get("description"):
+                        st.caption(meta["description"])
+                    st.caption(f"Uploaded: {meta.get('uploaded_at', '')[:10]}")
+
+                    load_key = f"load_{key}"
+                    if st.button("Load", key=f"btn_{key}"):
+                        st.session_state[load_key] = True
+
+                    if st.session_state.get(load_key):
+                        with st.spinner("Fetching..."):
+                            try:
+                                content = storage.get_file_content(file_owner, folder, filename)
+                            except Exception as e:
+                                st.error(f"Failed to load: {e}")
+                                continue
+                        _render_file(filename, content)
+
+                    st.divider()
+
+# ---------------------------------------------------------------------------
+# Page: Upload Files
+# ---------------------------------------------------------------------------
+
+elif page == "Upload Files":
+    st.title("Upload Files")
+
+    # Folder selector
+    existing_folders = storage.get_user_folders(user)
+    folder_options = ["(root)"] + existing_folders + ["+ New folder..."]
+    folder_choice = st.selectbox("Upload to folder", folder_options)
+
+    if folder_choice == "+ New folder...":
+        new_folder = st.text_input("New folder name", placeholder="e.g. work-project")
+        folder = new_folder.strip().replace(" ", "-") if new_folder.strip() else ""
+    elif folder_choice == "(root)":
+        folder = ""
+    else:
+        folder = folder_choice
+
     st.divider()
 
-    for filename, meta in sorted(filtered.items()):
-        with st.expander(f"**{filename}**  {_tag_badges(meta['tags'])}"):
-            desc = meta.get("description", "")
-            uploaded_at = meta.get("uploaded_at", "")[:10]
-
-            col_a, col_b = st.columns([3, 1])
-            with col_a:
-                if desc:
-                    st.caption(desc)
-                st.caption(f"Uploaded: {uploaded_at}")
-            with col_b:
-                load_key = f"load_{filename}"
-                if st.button("Load file", key=f"btn_{filename}"):
-                    st.session_state[load_key] = True
-
-            if st.session_state.get(load_key):
-                with st.spinner("Fetching from GitHub..."):
-                    try:
-                        content = storage.get_file_content(filename)
-                        raw_bytes = content.encode("utf-8")
-                    except Exception as e:
-                        st.error(f"Failed to load file: {e}")
-                        continue
-
-                _render_file(filename, content)
-
-                st.download_button(
-                    label="Download",
-                    data=raw_bytes,
-                    file_name=filename,
-                    mime="text/plain",
-                    key=f"dl_{filename}",
-                )
-
-# ---------------------------------------------------------------------------
-# Page: Upload File
-# ---------------------------------------------------------------------------
-
-elif page == "Upload File":
-    st.title("Upload File")
-
-    uploaded = st.file_uploader(
-        "Choose a file",
+    uploaded_files = st.file_uploader(
+        "Drag and drop files here (or click to browse)",
         type=ALLOWED_EXTENSIONS,
-        accept_multiple_files=False,
+        accept_multiple_files=True,
     )
 
-    if uploaded is not None:
-        raw_bytes = uploaded.read()
-        try:
-            content_str = raw_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            st.error("File does not appear to be a text file. Only text/code files are supported.")
-            st.stop()
-
-        filename = uploaded.name
-
-        st.subheader("Preview")
-        _render_file(filename, content_str)
-
-        st.divider()
-
-        tags_input = st.text_input(
-            "Tags (comma-separated)",
-            placeholder="e.g. python, etl, work",
-        )
-        description = st.text_area(
-            "Description (optional)",
-            placeholder="Brief note about this file",
-            height=80,
-        )
-
+    if uploaded_files:
+        tags_input = st.text_input("Tags for all files (comma-separated)", placeholder="e.g. python, etl")
+        description = st.text_area("Description (optional, applies to all)", height=70)
         tags = [t.strip() for t in tags_input.split(",") if t.strip()]
 
-        already_exists = storage.file_exists(filename)
-        if already_exists:
-            st.warning(f"**{filename}** already exists. Uploading will overwrite it.")
+        st.caption(f"{len(uploaded_files)} file(s) selected → folder: **{folder or '(root)'}**")
 
-        btn_label = "Overwrite" if already_exists else "Upload"
-        if st.button(btn_label, type="primary"):
-            with st.spinner("Uploading to GitHub..."):
+        if st.button("Upload All", type="primary"):
+            results = []
+            for uf in uploaded_files:
+                raw = uf.read()
                 try:
-                    storage.upload_file(filename, raw_bytes, tags, description)
-                    st.success(f"**{filename}** uploaded successfully.")
+                    raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    results.append((uf.name, False, "Not a text file — skipped."))
+                    continue
+                try:
+                    storage.upload_file(user, folder, uf.name, raw, tags, description)
+                    results.append((uf.name, True, ""))
                 except Exception as e:
-                    st.error(f"Upload failed: {e}")
+                    results.append((uf.name, False, str(e)))
+
+            for name, ok, err in results:
+                if ok:
+                    st.success(f"**{name}** uploaded.")
+                else:
+                    st.error(f"**{name}**: {err}")
 
 # ---------------------------------------------------------------------------
 # Page: Manage Files
@@ -239,65 +280,91 @@ elif page == "Upload File":
 elif page == "Manage Files":
     st.title("Manage Files")
 
-    index = storage.get_index()
-    files = index["files"]
+    files = storage.get_user_files(user)
 
     if not files:
-        st.info("No files to manage yet.")
+        st.info("You have no files yet.")
         st.stop()
 
-    for filename, meta in sorted(files.items()):
-        with st.expander(f"**{filename}**  {_tag_badges(meta['tags'])}"):
-            desc = meta.get("description", "")
-            uploaded_at = meta.get("uploaded_at", "")[:10]
-            st.caption(f"Uploaded: {uploaded_at}")
+    # Group by folder
+    grouped: dict[str, list] = {}
+    for key, meta in sorted(files.items()):
+        folder_name = meta["folder"] or "(root)"
+        grouped.setdefault(folder_name, []).append((key, meta))
 
-            # Edit metadata form
-            with st.form(key=f"edit_{filename}"):
-                new_tags_input = st.text_input(
-                    "Tags",
-                    value=", ".join(meta["tags"]),
-                    key=f"tags_{filename}",
-                )
-                new_desc = st.text_area(
-                    "Description",
-                    value=desc,
-                    height=70,
-                    key=f"desc_{filename}",
-                )
-                save_col, del_col = st.columns([1, 1])
-                with save_col:
-                    save = st.form_submit_button("Save changes")
-                with del_col:
-                    confirm_key = f"confirm_del_{filename}"
-                    delete = st.form_submit_button("Delete file", type="secondary")
+    for folder_name, file_list in sorted(grouped.items()):
+        st.subheader(f":open_file_folder: {folder_name}")
+        for key, meta in file_list:
+            filename = meta["filename"]
+            folder = meta["folder"]
+            with st.expander(f"**{filename}**  {_tag_badges(meta['tags'])}"):
+                with st.form(key=f"edit_{key}"):
+                    new_tags_input = st.text_input("Tags", value=", ".join(meta["tags"]))
+                    new_desc = st.text_area("Description", value=meta.get("description", ""), height=70)
+                    save_btn = st.form_submit_button("Save changes")
+                    del_btn = st.form_submit_button("Delete file", type="secondary")
 
-            if save:
-                new_tags = [t.strip() for t in new_tags_input.split(",") if t.strip()]
-                with st.spinner("Saving..."):
-                    try:
-                        storage.update_metadata(filename, new_tags, new_desc)
-                        st.success("Metadata updated.")
-                    except Exception as e:
-                        st.error(f"Failed to update: {e}")
+                if save_btn:
+                    new_tags = [t.strip() for t in new_tags_input.split(",") if t.strip()]
+                    with st.spinner("Saving..."):
+                        try:
+                            storage.update_metadata(user, folder, filename, new_tags, new_desc)
+                            st.success("Updated.")
+                        except Exception as e:
+                            st.error(str(e))
 
-            if delete:
-                st.session_state[f"confirm_del_{filename}"] = True
+                if del_btn:
+                    st.session_state[f"confirm_{key}"] = True
 
-            if st.session_state.get(f"confirm_del_{filename}"):
-                st.warning(f"Are you sure you want to delete **{filename}**? This cannot be undone.")
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Yes, delete", key=f"yes_del_{filename}", type="primary"):
-                        with st.spinner("Deleting..."):
-                            try:
-                                storage.delete_file(filename)
-                                st.session_state.pop(f"confirm_del_{filename}", None)
-                                st.success(f"**{filename}** deleted.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Delete failed: {e}")
-                with c2:
-                    if st.button("Cancel", key=f"cancel_del_{filename}"):
-                        st.session_state.pop(f"confirm_del_{filename}", None)
-                        st.rerun()
+                if st.session_state.get(f"confirm_{key}"):
+                    st.warning(f"Delete **{filename}**? This cannot be undone.")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("Yes, delete", key=f"yes_{key}", type="primary"):
+                            with st.spinner("Deleting..."):
+                                try:
+                                    storage.delete_file(user, folder, filename)
+                                    st.session_state.pop(f"confirm_{key}", None)
+                                    st.success("Deleted.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
+                    with c2:
+                        if st.button("Cancel", key=f"cancel_{key}"):
+                            st.session_state.pop(f"confirm_{key}", None)
+                            st.rerun()
+
+# ---------------------------------------------------------------------------
+# Page: Admin
+# ---------------------------------------------------------------------------
+
+elif page == "Admin" and admin:
+    st.title(":shield: Admin Panel")
+
+    tab_users, tab_files = st.tabs(["Users", "All Files"])
+
+    with tab_users:
+        users_data = storage.get_users()["users"]
+        if not users_data:
+            st.info("No registered users yet.")
+        else:
+            st.caption(f"{len(users_data)} registered user(s)")
+            for uname, uinfo in sorted(users_data.items()):
+                joined = uinfo.get("created_at", "")[:10]
+                file_count = sum(1 for v in storage.get_all_files().values() if v["owner"] == uname)
+                st.markdown(f"**{uname}** — joined {joined} — {file_count} file(s)")
+
+        if st.button("Refresh users"):
+            storage.get_users(force_refresh=True)
+            st.rerun()
+
+    with tab_files:
+        all_files = storage.get_all_files()
+        st.caption(f"{len(all_files)} total file(s) across all users")
+        for key, meta in sorted(all_files.items()):
+            st.markdown(
+                f"**{meta['filename']}** — "
+                f"owner: `{meta['owner']}` — "
+                f"folder: `{meta['folder'] or '(root)'}` — "
+                f"{meta.get('uploaded_at', '')[:10]}"
+            )
