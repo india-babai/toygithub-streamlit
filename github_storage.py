@@ -170,13 +170,13 @@ class GitHubStorage:
     # ------------------------------------------------------------------
 
     def get_user_files(self, username: str) -> dict:
-        return {k: v for k, v in self.get_index()["files"].items() if v["owner"] == username}
+        return {k: v for k, v in self.get_index()["files"].items() if v.get("owner") == username}
 
     def get_all_files(self) -> dict:
         return self.get_index()["files"]
 
     def get_user_folders(self, username: str) -> list[str]:
-        return sorted({v["folder"] for v in self.get_user_files(username).values() if v["folder"]})
+        return sorted({v.get("folder", "") for v in self.get_user_files(username).values() if v.get("folder")})
 
     def file_exists(self, username: str, folder: str, filename: str) -> bool:
         return self._file_key(username, folder, filename) in self.get_index()["files"]

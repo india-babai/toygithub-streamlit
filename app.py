@@ -161,8 +161,8 @@ if page == "Browse Files":
         st.info("No files yet. Go to **Upload Files** to add your first file.")
         st.stop()
 
-    all_tags = sorted({t for meta in files.values() for t in meta["tags"]})
-    all_owners = sorted({meta["owner"] for meta in files.values()}) if admin else []
+    all_tags = sorted({t for meta in files.values() for t in meta.get("tags", [])})
+    all_owners = sorted({meta.get("owner", "unknown") for meta in files.values()}) if admin else []
 
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
@@ -174,9 +174,9 @@ if page == "Browse Files":
 
     filtered = {
         k: v for k, v in files.items()
-        if (not search or search.lower() in v["filename"].lower())
-        and (not tag_filter or any(t in v["tags"] for t in tag_filter))
-        and (not admin or owner_filter == "All" or v["owner"] == owner_filter)
+        if (not search or search.lower() in v.get("filename", k).lower())
+        and (not tag_filter or any(t in v.get("tags", []) for t in tag_filter))
+        and (not admin or owner_filter == "All" or v.get("owner", "unknown") == owner_filter)
     }
 
     if not filtered:
@@ -186,8 +186,8 @@ if page == "Browse Files":
     # Group by owner → folder
     grouped: dict[str, dict[str, list]] = {}
     for key, meta in sorted(filtered.items()):
-        owner = meta["owner"]
-        folder = meta["folder"] or "(root)"
+        owner = meta.get("owner", "unknown")
+        folder = meta.get("folder") or "(root)"
         grouped.setdefault(owner, {}).setdefault(folder, []).append((key, meta))
 
     st.caption(f"{len(filtered)} file(s) found")
@@ -198,10 +198,10 @@ if page == "Browse Files":
         for folder_name, file_list in sorted(folders.items()):
             with st.expander(f":open_file_folder: {folder_name}  ({len(file_list)} file(s))", expanded=True):
                 for key, meta in file_list:
-                    filename = meta["filename"]
-                    folder = meta["folder"]
-                    file_owner = meta["owner"]
-                    st.markdown(f"**{filename}**  {_tag_badges(meta['tags'])}")
+                    filename = meta.get("filename", key.split("/")[-1])
+                    folder = meta.get("folder", "")
+                    file_owner = meta.get("owner", "unknown")
+                    st.markdown(f"**{filename}**  {_tag_badges(meta.get('tags', []))}")
                     if meta.get("description"):
                         st.caption(meta["description"])
                     st.caption(f"Uploaded: {meta.get('uploaded_at', '')[:10]}")
@@ -293,17 +293,17 @@ elif page == "Manage Files":
     # Group by folder
     grouped: dict[str, list] = {}
     for key, meta in sorted(files.items()):
-        folder_name = meta["folder"] or "(root)"
+        folder_name = meta.get("folder") or "(root)"
         grouped.setdefault(folder_name, []).append((key, meta))
 
     for folder_name, file_list in sorted(grouped.items()):
         st.subheader(f":open_file_folder: {folder_name}")
         for key, meta in file_list:
-            filename = meta["filename"]
-            folder = meta["folder"]
-            with st.expander(f"**{filename}**  {_tag_badges(meta['tags'])}"):
+            filename = meta.get("filename", key.split("/")[-1])
+            folder = meta.get("folder", "")
+            with st.expander(f"**{filename}**  {_tag_badges(meta.get('tags', []))}"):
                 with st.form(key=f"edit_{key}"):
-                    new_tags_input = st.text_input("Tags", value=", ".join(meta["tags"]))
+                    new_tags_input = st.text_input("Tags", value=", ".join(meta.get("tags", [])))
                     new_desc = st.text_area("Description", value=meta.get("description", ""), height=70)
                     save_btn = st.form_submit_button("Save changes")
                     del_btn = st.form_submit_button("Delete file", type="secondary")
@@ -355,7 +355,7 @@ elif page == "Admin" and admin:
             st.caption(f"{len(users_data)} registered user(s)")
             for uname, uinfo in sorted(users_data.items()):
                 joined = uinfo.get("created_at", "")[:10]
-                file_count = sum(1 for v in storage.get_all_files().values() if v["owner"] == uname)
+                file_count = sum(1 for v in storage.get_all_files().values() if v.get("owner") == uname)
                 st.markdown(f"**{uname}** — joined {joined} — {file_count} file(s)")
 
         if st.button("Refresh users"):
@@ -366,8 +366,8 @@ elif page == "Admin" and admin:
         st.caption(f"{len(all_files)} total file(s) across all users")
         for key, meta in sorted(all_files.items()):
             st.markdown(
-                f"**{meta['filename']}** — "
-                f"owner: `{meta['owner']}` — "
-                f"folder: `{meta['folder'] or '(root)'}` — "
+                f"**{meta.get('filename', key.split('/')[-1])}** — "
+                f"owner: `{meta.get('owner', 'unknown')}` — "
+                f"folder: `{meta.get('folder') or '(root)'}` — "
                 f"{meta.get('uploaded_at', '')[:10]}"
             )
