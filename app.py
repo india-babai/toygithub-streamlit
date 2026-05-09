@@ -67,6 +67,9 @@ if "username" not in st.session_state:
         if st.button("Login", type="primary", key="btn_login"):
             if not uname or not pwd:
                 st.error("Please enter username and password.")
+            elif uname == st.secrets.get("admin_username", "") and pwd == st.secrets.get("admin_password", ""):
+                st.session_state.username = uname
+                st.rerun()
             elif storage.verify_user(uname, pwd):
                 st.session_state.username = uname
                 st.rerun()
@@ -87,6 +90,8 @@ if "username" not in st.session_state:
                 st.error("Password must be at least 6 characters.")
             elif not new_user.replace("-", "").replace("_", "").isalnum():
                 st.error("Username may only contain letters, numbers, hyphens, and underscores.")
+            elif new_user == st.secrets.get("admin_username", ""):
+                st.error("That username is reserved.")
             else:
                 ok = storage.register_user(new_user, new_pwd)
                 if ok:
