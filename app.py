@@ -1,3 +1,4 @@
+import anthropic
 import streamlit as st
 from github_storage import GitHubStorage
 
@@ -113,9 +114,9 @@ user = current_user()
 st.sidebar.title(":file_folder: ToyGitHub")
 st.sidebar.caption(f"Logged in as **{user}**" + (" (admin)" if admin else ""))
 
-pages = ["Browse Files", "Upload Files", "Manage Files"]
+pages = ["Browse Files", "Upload Files", "Paste Code", "Manage Files"]
 if admin:
-    pages.append("Admin")
+    pages += ["Chat", "Admin"]
 
 page = st.sidebar.radio("Navigate", pages, label_visibility="collapsed")
 
@@ -337,6 +338,116 @@ elif page == "Manage Files":
                         if st.button("Cancel", key=f"cancel_{key}"):
                             st.session_state.pop(f"confirm_{key}", None)
                             st.rerun()
+
+# ---------------------------------------------------------------------------
+# Page: Paste Code
+# ---------------------------------------------------------------------------
+
+elif page == "Paste Code":
+    st.title("Paste Code")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        filename = st.text_input("Filename (include extension)", placeholder="e.g. etl_pipeline.py")
+    with col2:
+        existing_folders = storage.get_user_folders(user)
+        folder_options = ["(root)"] + existing_folders + ["+ New folder..."]
+        folder_choice = st.selectbox("Folder", folder_options, key="paste_folder")
+
+    if folder_choice == "+ New folder...":
+        new_folder = st.text_input("New folder name", placeholder="e.g. work-project", key="paste_new_folder")
+        folder = new_folder.strip().replace(" ", "-") if new_folder.strip() else ""
+    elif folder_choice == "(root)":
+        folder = ""
+    else:
+        folder = folder_choice
+
+    pasted = st.text_area(
+        "Paste your code or text here",
+        height=400,
+        placeholder="Paste code here...",
+    )
+
+    tags_input = st.text_input("Tags (comma-separated)", placeholder="e.g. python, etl", key="paste_tags")
+    description = st.text_area("Description (optional)", height=70, key="paste_desc")
+
+    if st.button("Save", type="primary", key="paste_save"):
+        if not filename:
+            st.error("Please enter a filename.")
+        elif not pasted.strip():
+            st.error("Nothing to save — paste some content first.")
+        else:
+            tags = [t.strip() for t in tags_input.split(",") if t.strip()]
+            raw = pasted.encode("utf-8")
+            overwrite = storage.file_exists(user, folder, filename)
+            if overwrite:
+                st.warning(f"**{filename}** already exists and will be overwritten.")
+            with st.spinner("Saving..."):
+                try:
+                    storage.upload_file(user, folder, filename, raw, tags, description)
+                    st.success(f"**{filename}** saved successfully.")
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
+
+    if pasted.strip() and filename:
+        st.divider()
+        st.caption("Preview")
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext == "md":
+            st.markdown(pasted)
+        else:
+            st.code(pasted, language=LANG_MAP.get(ext, "text"), line_numbers=True)
+
+# ---------------------------------------------------------------------------
+# Page: Chat (admin only)
+# ---------------------------------------------------------------------------
+
+elif page == "Chat" and admin:
+    st.title(":speech_balloon: Chat with Claude")
+
+    @st.cache_resource
+    def get_claude():
+        return anthropic.Anthropic(api_key=st.secrets["anthropic_api_key"])
+
+    claude = get_claude()
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    # Display conversation
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Input
+    user_input = st.chat_input("Ask Claude anything...")
+
+    if user_input:
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant"):
+            response_placeholder = st.empty()
+            full_response = ""
+
+            with claude.messages.stream(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system="You are a helpful coding assistant. Be concise and practical.",
+                messages=st.session_state.chat_history,
+            ) as stream:
+                for text in stream.text_stream:
+                    full_response += text
+                    response_placeholder.markdown(full_response + "▌")
+            response_placeholder.markdown(full_response)
+
+        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+
+    if st.session_state.chat_history:
+        if st.button("Clear chat"):
+            st.session_state.chat_history = []
+            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Page: Admin
