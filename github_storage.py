@@ -1,21 +1,12 @@
-import hashlib
 import json
-import secrets as _secrets
 from datetime import datetime, timezone
 
 from github import Github, GithubException
 
 INDEX_PATH = "_index.json"
-USERS_PATH = "_users.json"
+REPOS_PATH = "_repos.json"
 FILES_PREFIX = "files/"
-
-
-def _hash_password(password: str, salt: str) -> str:
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000).hex()
-
-
-def _new_salt() -> str:
-    return _secrets.token_hex(16)
+SHARED_USER = "shared"
 
 
 class GitHubStorage:
@@ -48,7 +39,7 @@ class GitHubStorage:
                 raise
 
     # ------------------------------------------------------------------
-    # Index
+    # File index
     # ------------------------------------------------------------------
 
     def get_index(self) -> dict:
@@ -58,38 +49,36 @@ class GitHubStorage:
         self._put_json(INDEX_PATH, index)
 
     # ------------------------------------------------------------------
-    # Users
+    # Saved repos
     # ------------------------------------------------------------------
 
-    def get_users(self) -> dict:
-        return self._get_json(USERS_PATH, {"users": {}})
+    def get_repos(self) -> list[dict]:
+        return self._get_json(REPOS_PATH, {"repos": []})["repos"]
 
-    def _save_users(self, users: dict):
-        self._put_json(USERS_PATH, users)
+    def save_repo(self, url: str, name: str, description: str = "") -> None:
+        data = self._get_json(REPOS_PATH, {"repos": []})
+        # Avoid duplicates
+        if not any(r["url"] == url for r in data["repos"]):
+            data["repos"].append({
+                "url": url,
+                "name": name,
+                "description": description,
+                "added_at": datetime.now(timezone.utc).isoformat(),
+            })
+            self._put_json(REPOS_PATH, data)
 
-    def register_user(self, username: str, password: str) -> bool:
-        """Returns False if username already taken."""
-        users = self.get_users()
-        if username in users["users"]:
-            return False
-        salt = _new_salt()
-        users["users"][username] = {
-            "password_hash": _hash_password(password, salt),
-            "salt": salt,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save_users(users)
-        return True
+    def delete_repo(self, url: str) -> None:
+        data = self._get_json(REPOS_PATH, {"repos": []})
+        data["repos"] = [r for r in data["repos"] if r["url"] != url]
+        self._put_json(REPOS_PATH, data)
 
-    def verify_user(self, username: str, password: str) -> bool:
-        users = self.get_users()
-        user = users["users"].get(username)
-        if not user:
-            return False
-        return _hash_password(password, user["salt"]) == user["password_hash"]
+    # ------------------------------------------------------------------
+    # External repo browsing (live, via GitHub API)
+    # ------------------------------------------------------------------
 
-    def username_exists(self, username: str) -> bool:
-        return username in self.get_users()["users"]
+    def get_external_repo(self, repo_name: str):
+        """Return a PyGithub repo object for any public repo (owner/repo)."""
+        return self._gh.get_repo(repo_name)
 
     # ------------------------------------------------------------------
     # File path helpers
@@ -169,14 +158,11 @@ class GitHubStorage:
     # Queries
     # ------------------------------------------------------------------
 
-    def get_user_files(self, username: str) -> dict:
-        return {k: v for k, v in self.get_index()["files"].items() if v.get("owner") == username}
-
     def get_all_files(self) -> dict:
         return self.get_index()["files"]
 
-    def get_user_folders(self, username: str) -> list[str]:
-        return sorted({v.get("folder", "") for v in self.get_user_files(username).values() if v.get("folder")})
+    def get_all_folders(self) -> list[str]:
+        return sorted({v.get("folder", "") for v in self.get_all_files().values() if v.get("folder")})
 
     def file_exists(self, username: str, folder: str, filename: str) -> bool:
         return self._file_key(username, folder, filename) in self.get_index()["files"]

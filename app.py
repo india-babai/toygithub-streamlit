@@ -1,4 +1,6 @@
+import re
 import streamlit as st
+from github import GithubException
 from github_storage import GitHubStorage
 
 # ---------------------------------------------------------------------------
@@ -45,14 +47,14 @@ def get_storage() -> GitHubStorage:
 storage = get_storage()
 
 # ---------------------------------------------------------------------------
-# Sidebar
+# Sidebar navigation
 # ---------------------------------------------------------------------------
 
 st.sidebar.title(":file_folder: ToyGitHub")
 
 page = st.sidebar.radio(
     "Navigate",
-    ["Browse Files", "Upload Files", "Paste Code", "Manage Files"],
+    ["Browse Files", "GitHub Repos", "Upload Files", "Paste Code", "Manage Files"],
     label_visibility="collapsed",
 )
 
@@ -79,9 +81,46 @@ def _render_file(filename: str, content: str):
     else:
         st.code(content, language=_lang(filename), line_numbers=True)
 
-def _get_all_folders() -> list[str]:
-    files = storage.get_all_files()
-    return sorted({v.get("folder", "") for v in files.values() if v.get("folder")})
+def _parse_github_url(url: str) -> str | None:
+    """Extract 'owner/repo' from a GitHub URL. Returns None if invalid."""
+    url = url.strip().rstrip("/")
+    # Handle https://github.com/owner/repo or github.com/owner/repo
+    match = re.search(r"github\.com/([^/]+/[^/]+)", url)
+    if match:
+        return match.group(1).removesuffix(".git")
+    return None
+
+def _build_tree(paths: list[str]) -> dict:
+    """Convert flat list of file paths into a nested dict. None = file."""
+    tree = {}
+    for path in sorted(paths):
+        parts = path.split("/")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = None
+    return tree
+
+def _render_tree(tree: dict, prefix: str = "", depth: int = 0) -> str | None:
+    """Render the file tree and return the selected file path, or None."""
+    selected = None
+    folders = sorted(k for k, v in tree.items() if v is not None)
+    files = sorted(k for k, v in tree.items() if v is None)
+
+    for folder in folders:
+        with st.expander(f"{'　' * depth}📁 **{folder}**", expanded=(depth == 0)):
+            result = _render_tree(tree[folder], prefix + folder + "/", depth + 1)
+            if result:
+                selected = result
+
+    for filename in files:
+        full_path = prefix + filename
+        label = f"{'　' * depth}📄 {filename}"
+        if st.button(label, key=f"tree_{full_path}", use_container_width=True):
+            st.session_state["selected_file_path"] = full_path
+            selected = full_path
+
+    return selected
 
 # ---------------------------------------------------------------------------
 # Page: Browse Files
@@ -114,7 +153,6 @@ if page == "Browse Files":
         st.warning("No files match your filters.")
         st.stop()
 
-    # Group by folder
     grouped: dict[str, list] = {}
     for key, meta in sorted(filtered.items()):
         folder = meta.get("folder") or "(root)"
@@ -149,13 +187,150 @@ if page == "Browse Files":
                 st.divider()
 
 # ---------------------------------------------------------------------------
+# Page: GitHub Repos
+# ---------------------------------------------------------------------------
+
+elif page == "GitHub Repos":
+    st.title(":octocat: GitHub Repos")
+
+    saved_repos = storage.get_repos()
+
+    # --- URL input ---
+    with st.form("add_repo_form"):
+        col_url, col_desc = st.columns([3, 2])
+        with col_url:
+            new_url = st.text_input("Paste a public GitHub repo URL", placeholder="https://github.com/owner/repo")
+        with col_desc:
+            new_desc = st.text_input("Short description (optional)")
+        submitted = st.form_submit_button("Add & Browse", type="primary")
+
+    if submitted and new_url.strip():
+        repo_id = _parse_github_url(new_url.strip())
+        if not repo_id:
+            st.error("Could not parse that URL. Make sure it's a valid GitHub repo link.")
+        else:
+            repo_name = repo_id.split("/")[-1]
+            with st.spinner(f"Connecting to {repo_id}..."):
+                try:
+                    storage.get_external_repo(repo_id)  # validate it exists
+                    storage.save_repo(new_url.strip(), repo_name, new_desc.strip())
+                    st.session_state["active_repo"] = repo_id
+                    st.session_state.pop("selected_file_path", None)
+                    st.session_state.pop("repo_tree_cache", None)
+                    st.rerun()
+                except GithubException:
+                    st.error("Repo not found or not accessible. Make sure it's a public repo.")
+
+    st.divider()
+
+    if not saved_repos:
+        st.info("No repos saved yet. Paste a GitHub URL above to get started.")
+        st.stop()
+
+    # --- Repo selector ---
+    repo_names = [f"{r['name']}  —  {r['url']}" for r in saved_repos]
+    active_repo_id = st.session_state.get("active_repo")
+
+    # Find default index based on active repo
+    default_idx = 0
+    if active_repo_id:
+        for i, r in enumerate(saved_repos):
+            if _parse_github_url(r["url"]) == active_repo_id:
+                default_idx = i
+                break
+
+    col_sel, col_del = st.columns([5, 1])
+    with col_sel:
+        chosen_idx = st.selectbox(
+            "Saved repos",
+            range(len(saved_repos)),
+            format_func=lambda i: repo_names[i],
+            index=default_idx,
+            label_visibility="collapsed",
+        )
+    with col_del:
+        if st.button("Remove", type="secondary"):
+            storage.delete_repo(saved_repos[chosen_idx]["url"])
+            st.session_state.pop("active_repo", None)
+            st.session_state.pop("selected_file_path", None)
+            st.session_state.pop("repo_tree_cache", None)
+            st.rerun()
+
+    chosen_repo = saved_repos[chosen_idx]
+    chosen_repo_id = _parse_github_url(chosen_repo["url"])
+
+    # If repo switched, clear cached tree and selected file
+    if st.session_state.get("active_repo") != chosen_repo_id:
+        st.session_state["active_repo"] = chosen_repo_id
+        st.session_state.pop("selected_file_path", None)
+        st.session_state.pop("repo_tree_cache", None)
+
+    if chosen_repo.get("description"):
+        st.caption(chosen_repo["description"])
+    st.caption(f"[{chosen_repo['url']}]({chosen_repo['url']})")
+
+    st.divider()
+
+    # --- Fetch & cache tree ---
+    cache_key = f"repo_tree_{chosen_repo_id}"
+    if cache_key not in st.session_state:
+        with st.spinner("Fetching repo structure..."):
+            try:
+                ext_repo = storage.get_external_repo(chosen_repo_id)
+                tree_obj = ext_repo.get_git_tree(ext_repo.default_branch, recursive=True)
+                all_paths = [
+                    item.path for item in tree_obj.tree
+                    if item.type == "blob"
+                ]
+                st.session_state[cache_key] = all_paths
+            except GithubException as e:
+                st.error(f"Failed to fetch repo: {e}")
+                st.stop()
+
+    all_paths = st.session_state[cache_key]
+    file_tree = _build_tree(all_paths)
+
+    # --- Two-column layout: tree + viewer ---
+    col_tree, col_viewer = st.columns([1, 2])
+
+    with col_tree:
+        st.markdown(f"**{len(all_paths)} files**")
+        _render_tree(file_tree)
+
+    with col_viewer:
+        selected_path = st.session_state.get("selected_file_path")
+        if selected_path:
+            st.markdown(f"#### `{selected_path}`")
+            view_cache_key = f"file_content_{chosen_repo_id}_{selected_path}"
+            if view_cache_key not in st.session_state:
+                with st.spinner("Loading file..."):
+                    try:
+                        ext_repo = storage.get_external_repo(chosen_repo_id)
+                        file_obj = ext_repo.get_contents(selected_path)
+                        try:
+                            st.session_state[view_cache_key] = file_obj.decoded_content.decode("utf-8")
+                        except UnicodeDecodeError:
+                            st.session_state[view_cache_key] = "__binary__"
+                    except GithubException as e:
+                        st.error(f"Could not load file: {e}")
+                        st.stop()
+
+            content = st.session_state[view_cache_key]
+            if content == "__binary__":
+                st.warning("Binary file — cannot display.")
+            else:
+                _render_file(selected_path.split("/")[-1], content)
+        else:
+            st.info("← Select a file from the tree to view it.")
+
+# ---------------------------------------------------------------------------
 # Page: Upload Files
 # ---------------------------------------------------------------------------
 
 elif page == "Upload Files":
     st.title("Upload Files")
 
-    existing_folders = _get_all_folders()
+    existing_folders = storage.get_all_folders()
     folder_options = ["(root)"] + existing_folders + ["+ New folder..."]
     folder_choice = st.selectbox("Upload to folder", folder_options)
 
@@ -179,29 +354,21 @@ elif page == "Upload Files":
         tags_input = st.text_input("Tags for all files (comma-separated)", placeholder="e.g. python, etl")
         description = st.text_area("Description (optional, applies to all)", height=70)
         tags = [t.strip() for t in tags_input.split(",") if t.strip()]
-
         st.caption(f"{len(uploaded_files)} file(s) selected → folder: **{folder or '(root)'}**")
 
         if st.button("Upload All", type="primary"):
-            results = []
             for uf in uploaded_files:
                 raw = uf.read()
                 try:
                     raw.decode("utf-8")
                 except UnicodeDecodeError:
-                    results.append((uf.name, False, "Not a text file — skipped."))
+                    st.error(f"**{uf.name}**: Not a text file — skipped.")
                     continue
                 try:
                     storage.upload_file(SHARED_USER, folder, uf.name, raw, tags, description)
-                    results.append((uf.name, True, ""))
+                    st.success(f"**{uf.name}** uploaded.")
                 except Exception as e:
-                    results.append((uf.name, False, str(e)))
-
-            for name, ok, err in results:
-                if ok:
-                    st.success(f"**{name}** uploaded.")
-                else:
-                    st.error(f"**{name}**: {err}")
+                    st.error(f"**{uf.name}**: {e}")
 
 # ---------------------------------------------------------------------------
 # Page: Paste Code
@@ -214,7 +381,7 @@ elif page == "Paste Code":
     with col1:
         filename = st.text_input("Filename (include extension)", placeholder="e.g. etl_pipeline.py")
     with col2:
-        existing_folders = _get_all_folders()
+        existing_folders = storage.get_all_folders()
         folder_options = ["(root)"] + existing_folders + ["+ New folder..."]
         folder_choice = st.selectbox("Folder", folder_options, key="paste_folder")
 
@@ -226,28 +393,22 @@ elif page == "Paste Code":
     else:
         folder = folder_choice
 
-    pasted = st.text_area(
-        "Paste your code or text here",
-        height=400,
-        placeholder="Paste code here...",
-    )
-
+    pasted = st.text_area("Paste your code or text here", height=400, placeholder="Paste code here...")
     tags_input = st.text_input("Tags (comma-separated)", placeholder="e.g. python, etl", key="paste_tags")
     description = st.text_area("Description (optional)", height=70, key="paste_desc")
 
-    if st.button("Save", type="primary", key="paste_save"):
+    if st.button("Save", type="primary"):
         if not filename:
             st.error("Please enter a filename.")
         elif not pasted.strip():
             st.error("Nothing to save — paste some content first.")
         else:
             tags = [t.strip() for t in tags_input.split(",") if t.strip()]
-            raw = pasted.encode("utf-8")
             if storage.file_exists(SHARED_USER, folder, filename):
                 st.warning(f"**{filename}** already exists and will be overwritten.")
             with st.spinner("Saving..."):
                 try:
-                    storage.upload_file(SHARED_USER, folder, filename, raw, tags, description)
+                    storage.upload_file(SHARED_USER, folder, filename, pasted.encode("utf-8"), tags, description)
                     st.success(f"**{filename}** saved successfully.")
                 except Exception as e:
                     st.error(f"Failed to save: {e}")
