@@ -1,4 +1,5 @@
 import re
+import requests
 import streamlit as st
 from github import GithubException
 from github_storage import GitHubStorage
@@ -199,7 +200,7 @@ with st.sidebar:
     st.divider()
     if st.button("🔄  Refresh data", use_container_width=True):
         for k in list(st.session_state.keys()):
-            if k.startswith(("repo_tree_", "file_content_")):
+            if k.startswith(("repo_tree_", "file_content_", "repo_zip_")):
                 del st.session_state[k]
         st.rerun()
 
@@ -459,7 +460,7 @@ elif page == "repos":
                         storage.save_repo(new_url.strip(), repo_id.split("/")[-1], new_desc.strip())
                         st.session_state["active_repo"] = repo_id
                         for k in list(st.session_state.keys()):
-                            if k.startswith(("repo_tree_", "file_content_", "selected_file")):
+                            if k.startswith(("repo_tree_", "file_content_", "selected_file", "repo_zip_")):
                                 del st.session_state[k]
                         st.success(f"**{repo_id}** added!")
                         st.rerun()
@@ -500,7 +501,7 @@ elif page == "repos":
             if st.button("🗑️ Remove", use_container_width=True):
                 storage.delete_repo(saved_repos[chosen_idx]["url"])
                 for k in list(st.session_state.keys()):
-                    if k.startswith(("active_repo", "repo_tree_", "file_content_", "selected_file")):
+                    if k.startswith(("active_repo", "repo_tree_", "file_content_", "selected_file", "repo_zip_")):
                         del st.session_state[k]
                 st.rerun()
 
@@ -514,7 +515,7 @@ elif page == "repos":
     if st.session_state.get("active_repo") != chosen_id:
         st.session_state["active_repo"] = chosen_id
         for k in list(st.session_state.keys()):
-            if k.startswith(("repo_tree_", "file_content_", "selected_file")):
+            if k.startswith(("repo_tree_", "file_content_", "selected_file", "repo_zip_")):
                 del st.session_state[k]
 
     st.markdown("")
@@ -541,6 +542,36 @@ elif page == "repos":
         with st.container(border=True):
             st.markdown(f"**📁 {chosen_id}**")
             st.caption(f"{len(all_paths)} files · click a file to view it")
+
+            # ── Download entire repo as ZIP ──────────────────────────
+            zip_key = f"repo_zip_{chosen_id}"
+            if zip_key in st.session_state:
+                st.download_button(
+                    "💾  Download ZIP",
+                    data=st.session_state[zip_key],
+                    file_name=f"{chosen_id.replace('/', '-')}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                    type="primary",
+                )
+                st.caption(f"Archive ready ({len(st.session_state[zip_key]) / 1024 / 1024:.1f} MB) — click to save.")
+            else:
+                if st.button("📦  Prepare ZIP of entire repo", use_container_width=True):
+                    with st.spinner(f"Fetching archive of {chosen_id}…"):
+                        try:
+                            ext_repo = storage.get_external_repo(chosen_id)
+                            zip_url = ext_repo.get_archive_link("zipball")
+                            resp = requests.get(zip_url, timeout=120)
+                            resp.raise_for_status()
+                            # Keep at most one prepared archive in memory
+                            for k in list(st.session_state.keys()):
+                                if k.startswith("repo_zip_"):
+                                    del st.session_state[k]
+                            st.session_state[zip_key] = resp.content
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to fetch archive: {e}")
+
             st.divider()
             _render_tree(file_tree)
 
