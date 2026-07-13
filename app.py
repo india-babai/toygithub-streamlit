@@ -540,8 +540,16 @@ elif page == "repos":
 
     with tree_col:
         with st.container(border=True):
-            st.markdown(f"**📁 {chosen_id}**")
-            st.caption(f"{len(all_paths)} files · click a file to view it")
+            hdr_col, refresh_col = st.columns([3, 1])
+            with hdr_col:
+                st.markdown(f"**📁 {chosen_id}**")
+                st.caption(f"{len(all_paths)} files · click a file to view it")
+            with refresh_col:
+                if st.button("🔄", key="refresh_repo", help="Re-fetch this repo from GitHub (picks up new commits)", use_container_width=True):
+                    for k in list(st.session_state.keys()):
+                        if k.startswith(("repo_tree_", "file_content_", "selected_file", "repo_zip_")):
+                            del st.session_state[k]
+                    st.rerun()
 
             # ── Download entire repo as ZIP ──────────────────────────
             zip_key = f"repo_zip_{chosen_id}"
